@@ -2424,6 +2424,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "meval",
+ "rand",
 ]
 
 [[package]]
