@@ -19,6 +19,7 @@
             buildInputs = with pkgs; [
               (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
               clang
+              irust
 
               # command automation
               just

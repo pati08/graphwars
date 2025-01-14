@@ -1,8 +1,7 @@
 use bevy::prelude::*;
-use meval::Expr;
 use std::{num::NonZeroU8, time::Duration};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum PlayerSelect {
     Player1,
     Player2,
@@ -50,21 +49,31 @@ pub struct PlayPhase {
     pub turn_length: Duration,
 }
 pub enum TurnPhase {
-    InputPhase {
-        input: String,
+    InputPhase { input: String, timer: Timer },
+    ShowPhase(TurnShowPhase), // ShowPhase {
+                              //     function: Function,
+                              //     prev_y: Option<f32>,
+                              //     next_x: f32,
+                              //     timer: Timer,
+                              // },
+}
+pub enum TurnShowPhase {
+    Graphing {
+        function: Function,
+        prev_y: Option<f32>,
+        next_x: f32,
         timer: Timer,
     },
-    ShowPhase {
-        function: Function,
-        next_x: f32,
+    Waiting {
         timer: Timer,
     },
 }
 pub struct Function {
-    pub original: Expr,
+    pub original: math_parse::MathParse,
     pub shift_up: f32,
 }
 
+#[derive(Debug)]
 pub struct PlayerState {
     pub name: String,
     // TODO: consider implementing this with
@@ -76,7 +85,7 @@ pub struct PlayerState {
     pub active_soldier: usize,
 }
 
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Debug)]
 pub struct Soldier {
     pub player: PlayerSelect,
     pub id: u8,
