@@ -10,6 +10,8 @@ use models::*;
 mod ui;
 use ui::ui_system;
 
+mod parse;
+
 const SOLDIER_RADIUS: f32 = 12.;
 const ACTIVE_SOLDIER_OUTLINE_COLOR: Color = Color::srgb(0., 1., 0.);
 const GRAPH_RES: f32 = 0.05;
@@ -201,9 +203,12 @@ fn update_turn(
         }) => {
             if timer.tick(time.delta()).just_finished() {
                 let Ok(next_y) = function.original.solve_float(Some(
-                    &[("x".to_string(), next_x.to_string())]
-                        .into_iter()
-                        .collect(),
+                    &[
+                        ("x".to_string(), next_x.to_string()),
+                        ("e".to_string(), std::f32::consts::E.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 )) else {
                     finish_graphing_events.send(DoneGraphing::Failed(*next_x));
                     return;
