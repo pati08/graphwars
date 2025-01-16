@@ -1,7 +1,7 @@
 use bevy::prelude::*;
-use std::{num::NonZeroU8, time::Duration};
+use std::{num::NonZeroU8, sync::Arc, time::Duration};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PlayerSelect {
     Player1,
     Player2,
@@ -49,7 +49,7 @@ pub struct PlayPhase {
     pub turn_length: Duration,
 }
 pub enum TurnPhase {
-    InputPhase { input: String, timer: Timer },
+    InputPhase { timer: Timer },
     ShowPhase(TurnShowPhase), // ShowPhase {
                               //     function: Function,
                               //     prev_y: Option<f32>,
@@ -69,7 +69,8 @@ pub enum TurnShowPhase {
     },
 }
 pub struct Function {
-    pub original: math_parse::MathParse,
+    pub original:
+        Arc<dyn Fn(f32) -> Result<f32, crate::parse::EvalError> + Send + Sync>,
     pub shift_up: f32,
 }
 
@@ -90,6 +91,7 @@ pub struct Soldier {
     pub player: PlayerSelect,
     pub id: u8,
     pub graph_location: Vec2,
+    pub equation: String,
 }
 #[derive(Bundle)]
 pub struct SoldierBundle {

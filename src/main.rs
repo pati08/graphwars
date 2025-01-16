@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin};
 use rand::{Rng, thread_rng};
 
 mod models;
@@ -12,18 +11,17 @@ use ui::ui_system;
 
 mod parse;
 
-const SOLDIER_RADIUS: f32 = 12.;
-const ACTIVE_SOLDIER_OUTLINE_COLOR: Color = Color::srgb(0., 1., 0.);
-const GRAPH_RES: f32 = 0.05;
-const GRAPHING_SPEED: f32 = 15.;
-const DEFAULT_FUNCTION: &str = "x";
-const DISCONTINUITY_THRESHOLD: f32 = 15.;
-const AFTER_GRAPH_PAUSE: Duration = Duration::from_secs(1);
+mod systems;
+use systems::graph_display::*;
+use systems::util::*;
+
+mod consts;
+use consts::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(EguiPlugin)
+        .add_plugins(bevy_egui::EguiPlugin)
         .insert_resource(Time::new(std::time::Instant::now()))
         .insert_resource(InputCaptureState {
             keyboard_captured: false,
@@ -45,34 +43,11 @@ fn main() {
                 ui_system.after(update_turn),
                 start_playing.after(ui_system),
                 draw_graph,
+                draw_soldier_names,
+                fade_explosions,
             ),
         )
         .run();
-}
-
-fn currently_graphing(graph: Option<Single<&InProgressGraph>>) -> bool {
-    graph.is_some()
-}
-
-fn finish_graphing(
-    mut events: EventReader<DoneGraphing>,
-    mut state: ResMut<GamePhase>,
-) {
-    match events.read().next() {
-        Some(DoneGraphing::Failed(fail_x)) => {
-            log::info!("Func failed at {fail_x}")
-        }
-        None => return,
-        _ => (),
-    };
-
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-        return;
-    };
-
-    playing_state.turn_phase = TurnPhase::ShowPhase(TurnShowPhase::Waiting {
-        timer: Timer::new(AFTER_GRAPH_PAUSE, TimerMode::Once),
-    });
 }
 
 fn next_turn(
@@ -152,7 +127,6 @@ fn next_turn(
 
     // Update the turn phase
     playing_state.turn_phase = TurnPhase::InputPhase {
-        input: DEFAULT_FUNCTION.to_string(),
         timer: Timer::new(playing_state.turn_length, TimerMode::Repeating),
     };
 
@@ -167,139 +141,11 @@ fn next_turn(
         Text2d::new(&next_player.name),
         CurrentPlayerText,
         Transform {
-            translation: Vec3::new(0., 300., 15.),
+            translation: Vec3::new(0., 300., PLAYER_NAME_Z),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
         },
     ));
-}
-
-#[derive(Event)]
-struct StartGraphing;
-
-#[derive(Event)]
-enum DoneGraphing {
-    Failed(f32),
-    Done,
-}
-
-fn update_turn(
-    mut commands: Commands,
-    mut state: ResMut<GamePhase>,
-    time: Res<Time>,
-    graph: Option<Single<&mut InProgressGraph>>,
-    mut start_graphing_events: EventWriter<StartGraphing>,
-    mut finish_graphing_events: EventWriter<DoneGraphing>,
-) {
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-        return;
-    };
-    match &mut playing_state.turn_phase {
-        TurnPhase::ShowPhase(TurnShowPhase::Graphing {
-            function,
-            prev_y,
-            next_x,
-            timer,
-        }) => {
-            if timer.tick(time.delta()).just_finished() {
-                let Ok(next_y) = function.original.solve_float(Some(
-                    &[
-                        ("x".to_string(), next_x.to_string()),
-                        ("e".to_string(), std::f32::consts::E.to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )) else {
-                    finish_graphing_events.send(DoneGraphing::Failed(*next_x));
-                    return;
-                };
-                let point =
-                    Vec2::new(*next_x, next_y as f32 + function.shift_up);
-                if let Some(mut graph) = graph {
-                    graph.points.push(point * 20.)
-                } else {
-                    commands.spawn(InProgressGraph {
-                        points: vec![point * 20.],
-                    });
-                }
-                if point.y.is_nan()
-                    || point.y.is_infinite()
-                    || prev_y.is_some_and(|y| {
-                        (y - point.y).abs()
-                            > GRAPH_RES * DISCONTINUITY_THRESHOLD
-                    })
-                {
-                    finish_graphing_events.send(DoneGraphing::Failed(point.x));
-                } else if point.x.abs() > 10. || point.y.abs() > 10. {
-                    finish_graphing_events.send(DoneGraphing::Done);
-                }
-                *next_x += GRAPH_RES;
-            }
-        }
-        TurnPhase::InputPhase { input: _, timer } => {
-            if timer.tick(time.delta()).finished() {
-                start_graphing_events.send(StartGraphing);
-            }
-        }
-        _ => (),
-    }
-}
-
-fn start_graphing(
-    mut state: ResMut<GamePhase>,
-    mut events: EventReader<StartGraphing>,
-    mut finish_graphing_events: EventWriter<DoneGraphing>,
-) {
-    if events.read().next().is_none() {
-        return;
-    }
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-        return;
-    };
-
-    let TurnPhase::InputPhase { input, timer: _ } = &playing_state.turn_phase
-    else {
-        return;
-    };
-    let re = regex::Regex::new(r"(-?\d+(?:\.\d+)?)x").unwrap();
-    let input = re
-        .replace_all(input, |caps: &regex::Captures| {
-            format!("{} * x", &caps[1])
-        })
-        .to_string();
-
-    let expression = math_parse::MathParse::parse(&input).unwrap(); // TODO: not this
-    let current_player = if let PlayerSelect::Player1 = playing_state.turn {
-        &playing_state.player_1
-    } else {
-        &playing_state.player_2
-    };
-    let active_soldier_pos = current_player.living_soldiers
-        [current_player.active_soldier]
-        .graph_location;
-    let Ok(y_start) = expression.solve_float(Some(
-        &[("x".to_string(), active_soldier_pos.x.to_string())]
-            .into_iter()
-            .collect(),
-    )) else {
-        finish_graphing_events.send(DoneGraphing::Failed(active_soldier_pos.x));
-        return;
-    };
-    let offset = active_soldier_pos.y - y_start as f32;
-    // - expression.clone().bind("x").unwrap()(active_soldier_pos.x as f64)
-    // as f32;
-    playing_state.turn_phase = TurnPhase::ShowPhase(TurnShowPhase::Graphing {
-        function: Function {
-            original: expression,
-            shift_up: offset,
-        },
-        prev_y: None,
-        next_x: active_soldier_pos.x,
-        timer: Timer::new(
-            Duration::from_secs_f32(GRAPH_RES / GRAPHING_SPEED),
-            TimerMode::Repeating,
-        ),
-    });
 }
 
 #[derive(Event)]
@@ -339,7 +185,6 @@ fn start_playing(
         player_2,
         turn: PlayerSelect::Player1,
         turn_phase: TurnPhase::InputPhase {
-            input: DEFAULT_FUNCTION.to_string(),
             timer: Timer::new(
                 Duration::from_secs(setup_state.turn_seconds.into()),
                 TimerMode::Repeating,
@@ -351,7 +196,7 @@ fn start_playing(
         Mesh2d(meshes.add(Rectangle::new(440., 440.))),
         MeshMaterial2d(materials.add(Color::WHITE)),
         Transform {
-            translation: Vec3::new(0., 0., -10.),
+            translation: Vec3::new(0., 0., GRID_BACKGROUND_Z),
             ..Default::default()
         },
         GridBackground,
@@ -370,7 +215,7 @@ fn start_playing(
         .chain(playing_state.player_2.living_soldiers.iter())
     {
         let pos = soldier.graph_location * 20.;
-        let translation = Vec3::new(pos.x, pos.y, 10.0);
+        let translation = Vec3::new(pos.x, pos.y, SOLDIER_Z);
         let bundle = SoldierBundle {
             soldier: soldier.clone(),
             transform: Transform {
@@ -394,37 +239,11 @@ fn start_playing(
         Text2d::new(&playing_state.player_1.name),
         CurrentPlayerText,
         Transform {
-            translation: Vec3::new(0., 300., 15.),
+            translation: Vec3::new(0., 300., PLAYER_NAME_Z),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
         },
     ));
-}
-
-#[derive(Component)]
-struct CurrentPlayerText;
-
-fn draw_graph(
-    mut gizmos: Gizmos,
-    state: Res<GamePhase>,
-    graph: Option<Single<&InProgressGraph>>,
-) {
-    let GamePhase::Playing(_) = *state else {
-        return;
-    };
-
-    gizmos
-        .grid_2d(
-            Isometry2d::default(),
-            UVec2::new(20, 20),
-            Vec2::new(20., 20.),
-            Color::BLACK,
-        )
-        .outer_edges();
-
-    if let Some(graph) = graph {
-        gizmos.linestrip_2d(graph.points.clone(), Color::srgb(1., 0., 0.));
-    }
 }
 
 fn gen_soldiers(player: PlayerSelect, num: u8) -> Vec<Soldier> {
@@ -437,8 +256,9 @@ fn gen_soldiers(player: PlayerSelect, num: u8) -> Vec<Soldier> {
             let pos = Vec2 { x, y };
             Soldier {
                 player,
-                id: num,
+                id: soldiers.len() as u8,
                 graph_location: pos,
+                equation: DEFAULT_FUNCTION.to_string(),
             }
         };
         if !soldiers.iter().any(|i: &Soldier| {
@@ -453,26 +273,4 @@ fn gen_soldiers(player: PlayerSelect, num: u8) -> Vec<Soldier> {
         }
     }
     soldiers
-}
-
-#[derive(Component)]
-struct GridBackground;
-
-fn capture_info(
-    mut input_capture_state: ResMut<InputCaptureState>,
-    mut egui: EguiContexts,
-) {
-    input_capture_state.keyboard_captured =
-        egui.ctx_mut().wants_keyboard_input();
-    input_capture_state.pointer_captured = egui.ctx_mut().wants_pointer_input();
-}
-
-#[derive(Resource)]
-struct InputCaptureState {
-    keyboard_captured: bool,
-    pointer_captured: bool,
-}
-
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
 }

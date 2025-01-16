@@ -97,13 +97,14 @@ fn play_ui(
         return;
     };
     let current_player = if let PlayerSelect::Player1 = playing_state.turn {
-        &playing_state.player_1
+        &mut playing_state.player_1
     } else {
-        &playing_state.player_2
+        &mut playing_state.player_2
     };
-    let active_soldier_pos = current_player.living_soldiers
-        [current_player.active_soldier]
-        .graph_location;
+    let current_soldier =
+        &mut current_player.living_soldiers[current_player.active_soldier];
+    let current_input = &mut current_soldier.equation;
+    let active_soldier_pos = current_soldier.graph_location;
     gizmos.circle_2d(
         Isometry2d {
             rotation: Rot2::IDENTITY,
@@ -112,10 +113,8 @@ fn play_ui(
         super::SOLDIER_RADIUS,
         super::ACTIVE_SOLDIER_OUTLINE_COLOR,
     );
-    if let &mut TurnPhase::InputPhase {
-        ref mut input,
-        ref timer,
-    } = &mut playing_state.turn_phase
+    if let &mut TurnPhase::InputPhase { ref timer } =
+        &mut playing_state.turn_phase
     {
         egui::TopBottomPanel::new(
             egui::panel::TopBottomSide::Bottom,
@@ -123,11 +122,11 @@ fn play_ui(
         )
         .show(context, |ui| {
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(input);
+                ui.text_edit_singleline(current_input);
                 if ui.button("Done").clicked() {
                     start_graphing_events.send(StartGraphing);
                 }
-                ui.label(timer.remaining().as_secs_f32().to_string());
+                ui.label(timer.remaining().as_secs().to_string());
             })
         });
     }

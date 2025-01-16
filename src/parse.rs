@@ -7,13 +7,29 @@ pub struct ParsedFunction {
 }
 
 impl ParsedFunction {
-    fn add_var(&mut self, var: impl ToString, val: f32) {
+    pub fn add_var(&mut self, var: impl ToString, val: f32) {
         let var = var.to_string();
         let binding = (var, val);
         if self.bound_vars.contains(&binding) {
             return;
         }
         self.bound_vars.push(binding);
+    }
+    pub fn bind<T: ToString + Send + Sync>(
+        &self,
+        var: T,
+    ) -> impl Fn(f32) -> Result<f32, EvalError> + Send + Sync + use<T> {
+        let vars = self.bound_vars.clone();
+        let tree = self.tree.clone();
+        move |v: f32| {
+            tree.eval(
+                &vars
+                    .iter()
+                    .map(|i| i.to_owned())
+                    .chain(std::iter::once((var.to_string(), v)))
+                    .collect::<Box<[_]>>(),
+            )
+        }
     }
 }
 
@@ -70,7 +86,10 @@ impl FromStr for ParsedFunction {
         let tokens = tokenize(s)?;
         let rpn = shunting_yard(tokens);
         let expression_tree = build_expression_tree(rpn)?;
-        Ok(ParsedFunction(expression_tree))
+        Ok(ParsedFunction {
+            tree: expression_tree,
+            bound_vars: Vec::new(),
+        })
     }
 }
 
@@ -97,6 +116,7 @@ pub enum TreeBuildError {
     RemainingNodes,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 enum ExpressionNode {
     Literal(f32),
     Variable(String),
@@ -106,7 +126,7 @@ enum ExpressionNode {
 }
 
 #[derive(Debug, Error)]
-enum EvalError {
+pub enum EvalError {
     #[error("Undefined variable used")]
     UndefinedVariable,
     #[error("Function failed")]
@@ -116,7 +136,7 @@ enum EvalError {
 }
 
 impl ExpressionNode {
-    fn eval(&self, vars: &[(&str, f32)]) -> Result<f32, EvalError> {
+    fn eval(&self, vars: &[(String, f32)]) -> Result<f32, EvalError> {
         match self {
             ExpressionNode::Pair(op, left, right) => {
                 Ok(op.apply(left.eval(vars)?, right.eval(vars)?)?)
@@ -126,7 +146,7 @@ impl ExpressionNode {
             }
             ExpressionNode::Literal(val) => Ok(*val),
             ExpressionNode::Variable(var) => {
-                if let Some((_, val)) = vars.iter().find(|i| i.0 == var) {
+                if let Some((_, val)) = vars.iter().find(|i| i.0 == *var) {
                     Ok(*val)
                 } else {
                     Err(EvalError::UndefinedVariable)
@@ -139,7 +159,7 @@ impl ExpressionNode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum SupportedFunction {
     Sin,
     Exp,
@@ -183,6 +203,7 @@ impl SupportedFunction {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum RPNToken {
     UnaryOperator(UnaryOp),
     BinaryOperator(BinaryOp),
@@ -191,6 +212,7 @@ enum RPNToken {
     Literal(f32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum UnaryOp {
     Negate,
 }
@@ -202,6 +224,7 @@ impl UnaryOp {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum BinaryOp {
     Add,
     Subtract,
@@ -234,7 +257,7 @@ impl BinaryOp {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum InfixTokenOperator {
     Add,
     SubtractOrNegate,
@@ -244,7 +267,7 @@ enum InfixTokenOperator {
     ImplicitMultiply,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum InfixToken {
     ParenOpen,
     ParenClose,
@@ -321,16 +344,16 @@ fn tokenize(expression: &str) -> Result<Vec<InfixToken>, TokenizerError> {
             at += len;
         } else if let Some(op) = expression
             .chars()
-            .next()
+            .nth(at)
             .map(|c| TOKEN_OPS.iter().find(|&i| i.0 == c).map(|v| v.1))
             .flatten()
         {
             tokens.push(InfixToken::Operator(op));
             at += 1;
-        } else if let Some('(') = expression.chars().next() {
+        } else if let Some('(') = expression.chars().nth(at) {
             tokens.push(InfixToken::ParenOpen);
             at += 1;
-        } else if let Some(')') = expression.chars().next() {
+        } else if let Some(')') = expression.chars().nth(at) {
             tokens.push(InfixToken::ParenClose);
             at += 1;
         } else {
@@ -366,9 +389,9 @@ fn get_operator_precedence(op: InfixTokenOperator) -> u8 {
         InfixTokenOperator::Add => 1,
         InfixTokenOperator::SubtractOrNegate => 1,
         InfixTokenOperator::Multiply => 2,
-        InfixTokenOperator::ImplicitMultiply => 3, // Higher precedence than explicit multiply
+        InfixTokenOperator::ImplicitMultiply => 3, // Higher than explicit multiply
         InfixTokenOperator::Divide => 2,
-        InfixTokenOperator::Power => 4,
+        InfixTokenOperator::Power => 5, // Increased to be higher than function application
     }
 }
 
@@ -381,11 +404,10 @@ fn should_be_unary_minus(tokens: &[InfixToken], current_pos: usize) -> bool {
         return true;
     }
 
-    match tokens.get(current_pos - 1) {
-        Some(InfixToken::ParenOpen) => true,
-        Some(InfixToken::Operator(_)) => true,
-        _ => false,
-    }
+    matches!(
+        tokens.get(current_pos - 1),
+        Some(InfixToken::ParenOpen) | Some(InfixToken::Operator(_))
+    )
 }
 
 fn should_add_implicit_multiply(prev: &InfixToken, next: &InfixToken) -> bool {
@@ -400,6 +422,33 @@ fn should_add_implicit_multiply(prev: &InfixToken, next: &InfixToken) -> bool {
         (InfixToken::Variable(_), InfixToken::Variable(_)) => true,
         _ => false
     }
+}
+
+fn handle_function_application(tokens: Vec<InfixToken>) -> Vec<InfixToken> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < tokens.len() {
+        if matches!(tokens[i], InfixToken::Function(_)) {
+            let func = tokens[i];
+            // Look ahead - if next token is not an open paren, treat as implicit function application
+            if i + 1 < tokens.len()
+                && !matches!(tokens[i + 1], InfixToken::ParenOpen)
+            {
+                // Push the operand first, then the function
+                result.push(tokens[i + 1]);
+                if let InfixToken::Function(f) = func {
+                    result.push(InfixToken::Function(f));
+                }
+                i += 2;
+                continue;
+            }
+        }
+        result.push(tokens[i]);
+        i += 1;
+    }
+
+    result
 }
 
 fn should_pop_operator(
@@ -434,19 +483,22 @@ fn insert_implicit_multiplications(tokens: Vec<InfixToken>) -> Vec<InfixToken> {
                 ));
             }
         }
-        result.push(token.clone());
+        result.push(*token);
         prev_token = Some(token);
     }
 
     result
 }
 
-pub fn shunting_yard(tokens: Vec<InfixToken>) -> Vec<RPNToken> {
-    // First, insert implicit multiplication operators
+fn shunting_yard(tokens: Vec<InfixToken>) -> Vec<RPNToken> {
+    // First handle function applications
+    let tokens = handle_function_application(tokens);
+
+    // Then handle implicit multiplications
     let tokens = insert_implicit_multiplications(tokens);
 
     let mut output: Vec<RPNToken> = Vec::new();
-    let mut operator_stack: Vec<InfixToken> = Vec::new();
+    let mut operator_stack: Vec<(InfixToken, bool)> = Vec::new(); // Store operator and whether it's unary
 
     for (pos, token) in tokens.iter().copied().enumerate() {
         match token {
@@ -457,16 +509,23 @@ pub fn shunting_yard(tokens: Vec<InfixToken>) -> Vec<RPNToken> {
                 output.push(RPNToken::VariableName(var.to_string()));
             }
             InfixToken::Function(func) => {
-                operator_stack.push(InfixToken::Function(func));
+                // If it's a bare function (from our handle_function_application),
+                // directly output it
+                if pos > 0 && !matches!(tokens[pos - 1], InfixToken::ParenOpen)
+                {
+                    output.push(RPNToken::Function(func));
+                } else {
+                    operator_stack.push((InfixToken::Function(func), false));
+                }
             }
             InfixToken::ParenOpen => {
-                operator_stack.push(InfixToken::ParenOpen);
+                operator_stack.push((InfixToken::ParenOpen, false));
             }
             InfixToken::ParenClose => {
-                while let Some(top) = operator_stack.last() {
+                while let Some((top, _)) = operator_stack.last() {
                     if matches!(top, InfixToken::ParenOpen) {
                         operator_stack.pop();
-                        if let Some(InfixToken::Function(func)) =
+                        if let Some((InfixToken::Function(func), _)) =
                             operator_stack.last()
                         {
                             output.push(RPNToken::Function(*func));
@@ -474,20 +533,26 @@ pub fn shunting_yard(tokens: Vec<InfixToken>) -> Vec<RPNToken> {
                         }
                         break;
                     }
-                    if let Some(InfixToken::Operator(op)) = operator_stack.pop()
+                    if let Some((InfixToken::Operator(op), is_unary)) =
+                        operator_stack.pop()
                     {
-                        output.push(RPNToken::BinaryOperator(match op {
-                            InfixTokenOperator::Add => BinaryOp::Add,
-                            InfixTokenOperator::SubtractOrNegate => {
-                                BinaryOp::Subtract
-                            }
-                            InfixTokenOperator::Multiply
-                            | InfixTokenOperator::ImplicitMultiply => {
-                                BinaryOp::Multiply
-                            }
-                            InfixTokenOperator::Divide => BinaryOp::Divide,
-                            InfixTokenOperator::Power => BinaryOp::Power,
-                        }));
+                        if is_unary {
+                            output
+                                .push(RPNToken::UnaryOperator(UnaryOp::Negate));
+                        } else {
+                            output.push(RPNToken::BinaryOperator(match op {
+                                InfixTokenOperator::Add => BinaryOp::Add,
+                                InfixTokenOperator::SubtractOrNegate => {
+                                    BinaryOp::Subtract
+                                }
+                                InfixTokenOperator::Multiply
+                                | InfixTokenOperator::ImplicitMultiply => {
+                                    BinaryOp::Multiply
+                                }
+                                InfixTokenOperator::Divide => BinaryOp::Divide,
+                                InfixTokenOperator::Power => BinaryOp::Power,
+                            }));
+                        }
                     }
                 }
             }
@@ -496,49 +561,157 @@ pub fn shunting_yard(tokens: Vec<InfixToken>) -> Vec<RPNToken> {
                     matches!(op, InfixTokenOperator::SubtractOrNegate)
                         && should_be_unary_minus(&tokens, pos);
 
-                while let Some(InfixToken::Operator(stack_op)) =
-                    operator_stack.last().copied()
+                while let Some((
+                    InfixToken::Operator(stack_op),
+                    stack_is_unary,
+                )) = operator_stack.last().copied()
                 {
                     if should_pop_operator(stack_op, op, is_unary) {
                         operator_stack.pop();
-                        output.push(RPNToken::BinaryOperator(match stack_op {
-                            InfixTokenOperator::Add => BinaryOp::Add,
-                            InfixTokenOperator::SubtractOrNegate => {
-                                BinaryOp::Subtract
-                            }
-                            InfixTokenOperator::Multiply
-                            | InfixTokenOperator::ImplicitMultiply => {
-                                BinaryOp::Multiply
-                            }
-                            InfixTokenOperator::Divide => BinaryOp::Divide,
-                            InfixTokenOperator::Power => BinaryOp::Power,
-                        }));
+                        if stack_is_unary {
+                            output
+                                .push(RPNToken::UnaryOperator(UnaryOp::Negate));
+                        } else {
+                            output.push(RPNToken::BinaryOperator(
+                                match stack_op {
+                                    InfixTokenOperator::Add => BinaryOp::Add,
+                                    InfixTokenOperator::SubtractOrNegate => {
+                                        BinaryOp::Subtract
+                                    }
+                                    InfixTokenOperator::Multiply
+                                    | InfixTokenOperator::ImplicitMultiply => {
+                                        BinaryOp::Multiply
+                                    }
+                                    InfixTokenOperator::Divide => {
+                                        BinaryOp::Divide
+                                    }
+                                    InfixTokenOperator::Power => {
+                                        BinaryOp::Power
+                                    }
+                                },
+                            ));
+                        }
                     } else {
                         break;
                     }
                 }
 
-                if is_unary {
-                    operator_stack.push(token);
-                    output.push(RPNToken::UnaryOperator(UnaryOp::Negate));
-                } else {
-                    operator_stack.push(token);
-                }
+                operator_stack.push((token, is_unary));
             }
         }
     }
 
-    // Pop remaining operators
-    while let Some(InfixToken::Operator(op)) = operator_stack.pop() {
-        output.push(RPNToken::BinaryOperator(match op {
-            InfixTokenOperator::Add => BinaryOp::Add,
-            InfixTokenOperator::SubtractOrNegate => BinaryOp::Subtract,
-            InfixTokenOperator::Multiply
-            | InfixTokenOperator::ImplicitMultiply => BinaryOp::Multiply,
-            InfixTokenOperator::Divide => BinaryOp::Divide,
-            InfixTokenOperator::Power => BinaryOp::Power,
-        }));
+    while let Some((op, is_unary)) = operator_stack.pop() {
+        match op {
+            InfixToken::Operator(stack_op) => {
+                if is_unary {
+                    output.push(RPNToken::UnaryOperator(UnaryOp::Negate));
+                } else {
+                    output.push(RPNToken::BinaryOperator(match stack_op {
+                        InfixTokenOperator::Add => BinaryOp::Add,
+                        InfixTokenOperator::SubtractOrNegate => {
+                            BinaryOp::Subtract
+                        }
+                        InfixTokenOperator::Multiply
+                        | InfixTokenOperator::ImplicitMultiply => {
+                            BinaryOp::Multiply
+                        }
+                        InfixTokenOperator::Divide => BinaryOp::Divide,
+                        InfixTokenOperator::Power => BinaryOp::Power,
+                    }));
+                }
+            }
+            InfixToken::Function(func) => {
+                output.push(RPNToken::Function(func));
+            }
+            _ => {}
+        }
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenizer_func() {
+        let test_sets = [
+            ("sin(x)", vec![
+                InfixToken::Function(SupportedFunction::Sin),
+                InfixToken::ParenOpen,
+                InfixToken::Variable('x'),
+                InfixToken::ParenClose,
+            ]),
+            ("1/(1000(x-19.5))", vec![
+                InfixToken::Literal(1.),
+                InfixToken::Operator(InfixTokenOperator::Divide),
+                InfixToken::ParenOpen,
+                InfixToken::Literal(1000.),
+                InfixToken::ParenOpen,
+                InfixToken::Variable('x'),
+                InfixToken::Operator(InfixTokenOperator::SubtractOrNegate),
+                InfixToken::Literal(19.5),
+                InfixToken::ParenClose,
+                InfixToken::ParenClose,
+            ]),
+        ];
+        for (input, correct_tokens) in test_sets {
+            let tokens = tokenize(input)
+                .unwrap_or_else(|_| panic!("Failed to tokenize \"{input}\""));
+            assert_eq!(tokens, correct_tokens);
+            println!();
+        }
+    }
+
+    #[test]
+    fn test_build_tree() {
+        let test_sets = [(
+            vec![
+                RPNToken::VariableName("x".to_string()),
+                RPNToken::UnaryOperator(UnaryOp::Negate),
+            ],
+            ExpressionNode::Unary(
+                UnaryOp::Negate,
+                Box::new(ExpressionNode::Variable("x".to_string())),
+            ),
+        )];
+        for (tokens, correct_tree) in test_sets {
+            let tree = build_expression_tree(tokens).unwrap();
+            assert_eq!(tree, correct_tree);
+        }
+    }
+
+    #[test]
+    fn test_shunting_yard() {
+        let test_sets = [
+            (
+                vec![
+                    InfixToken::Operator(InfixTokenOperator::SubtractOrNegate),
+                    InfixToken::Variable('x'),
+                ],
+                vec![
+                    RPNToken::VariableName("x".to_string()),
+                    RPNToken::UnaryOperator(UnaryOp::Negate),
+                ],
+            ),
+            (
+                vec![
+                    InfixToken::ParenOpen,
+                    InfixToken::Operator(InfixTokenOperator::SubtractOrNegate),
+                    InfixToken::Literal(1.),
+                    InfixToken::ParenClose,
+                ],
+                vec![
+                    RPNToken::Literal(1.),
+                    RPNToken::UnaryOperator(UnaryOp::Negate),
+                ],
+            ),
+        ];
+        for (infix, correct_rpn) in test_sets {
+            let rpn = shunting_yard(infix);
+            assert_eq!(rpn, correct_rpn);
+        }
+    }
 }
