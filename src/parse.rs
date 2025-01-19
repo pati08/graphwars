@@ -1,6 +1,7 @@
 use std::str::FromStr;
 use thiserror::Error;
 
+#[derive(Clone)]
 pub struct ParsedFunction {
     tree: ExpressionNode,
     bound_vars: Vec<(String, f32)>,
@@ -345,8 +346,7 @@ fn tokenize(expression: &str) -> Result<Vec<InfixToken>, TokenizerError> {
         } else if let Some(op) = expression
             .chars()
             .nth(at)
-            .map(|c| TOKEN_OPS.iter().find(|&i| i.0 == c).map(|v| v.1))
-            .flatten()
+            .and_then(|c| TOKEN_OPS.iter().find(|&i| i.0 == c).map(|v| v.1))
         {
             tokens.push(InfixToken::Operator(op));
             at += 1;

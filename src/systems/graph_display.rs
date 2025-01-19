@@ -1,12 +1,106 @@
 use crate::consts::*;
 use crate::models::*;
-use crate::parse;
+use crate::parse::ParsedFunction;
+use crate::util::smoothstep;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Component)]
+pub struct CurrentPlayerText;
+
+#[derive(Component)]
+pub struct GridBackground;
+
+#[derive(Component)]
+pub struct ExplosionFadeTimer(Timer);
+
+#[derive(Component)]
 pub struct SoldierNameText;
+
+#[derive(Event, Clone)]
+pub struct StartGraphingEvent(pub ParsedFunction);
+
+#[derive(Event)]
+pub struct SkipGraphingEvent;
+
+#[derive(Event)]
+pub enum DoneGraphingEvent {
+    Failed(f32),
+    Done,
+}
+
+pub fn start_graphing(
+    mut state: ResMut<GameState>,
+    mut events: EventReader<StartGraphingEvent>,
+    mut finish_graphing_events: EventWriter<DoneGraphingEvent>,
+) {
+    let Some(StartGraphingEvent(mut parsed_function)) =
+        events.read().next().cloned()
+    else {
+        return;
+    };
+    let Some(playing_state) = state.playing_state_mut() else {
+        return;
+    };
+
+    if !playing_state.turn_phase().is_input() {
+        return;
+    };
+
+    let current_player = playing_state.current_player();
+
+    parsed_function.add_var("e", std::f32::consts::E);
+    parsed_function.add_var("π", std::f32::consts::PI);
+    let func = parsed_function.bind("x");
+
+    let active_soldier_pos = current_player.current_soldier().graph_location();
+    let Ok(y_start) = func(active_soldier_pos.x) else {
+        finish_graphing_events
+            .send(DoneGraphingEvent::Failed(active_soldier_pos.x));
+        return;
+    };
+    let offset = active_soldier_pos.y - y_start;
+    // - expression.clone().bind("x").unwrap()(active_soldier_pos.x as f64)
+    // as f32;
+    *playing_state.turn_phase_mut() =
+        TurnPhase::ShowPhase(TurnShowPhase::Graphing {
+            function: Function {
+                original: Arc::new(func),
+                shift_up: offset,
+            },
+            prev_y: None,
+            next_x: active_soldier_pos.x,
+            timer: Timer::new(
+                Duration::from_secs_f32(GRAPH_RES / GRAPHING_SPEED),
+                TimerMode::Repeating,
+            ),
+        });
+}
+
+pub fn finish_drawing_graph(
+    mut events: EventReader<DoneGraphingEvent>,
+    mut state: ResMut<GameState>,
+) {
+    match events.read().next() {
+        Some(DoneGraphingEvent::Failed(fail_x)) => {
+            log::info!("Func failed at {fail_x}")
+        }
+        None => return,
+        _ => (),
+    };
+
+    let Some(playing_state) = state.playing_state_mut() else {
+        return;
+    };
+
+    *playing_state.turn_phase_mut() =
+        TurnPhase::ShowPhase(TurnShowPhase::Waiting {
+            timer: Timer::new(AFTER_GRAPH_PAUSE, TimerMode::Once),
+        });
+}
 
 pub fn draw_soldier_names(
     mut commands: Commands,
@@ -20,7 +114,7 @@ pub fn draw_soldier_names(
 
     for (soldier, loc) in soldiers.iter() {
         commands.spawn((
-            Text2d::new((soldier.id + 1).to_string()),
+            Text2d::new((soldier.id() + 1).to_string()),
             TextColor(Color::BLACK),
             SoldierNameText,
             Transform {
@@ -30,53 +124,6 @@ pub fn draw_soldier_names(
                 scale: Vec3::ONE,
             },
         ));
-    }
-}
-
-pub fn currently_graphing(graph: Option<Single<&InProgressGraph>>) -> bool {
-    graph.is_some()
-}
-
-pub fn finish_graphing(
-    mut events: EventReader<DoneGraphing>,
-    mut state: ResMut<GamePhase>,
-) {
-    match events.read().next() {
-        Some(DoneGraphing::Failed(fail_x)) => {
-            log::info!("Func failed at {fail_x}")
-        }
-        None => return,
-        _ => (),
-    };
-
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-        return;
-    };
-
-    playing_state.turn_phase = TurnPhase::ShowPhase(TurnShowPhase::Waiting {
-        timer: Timer::new(AFTER_GRAPH_PAUSE, TimerMode::Once),
-    });
-}
-
-#[derive(Component)]
-pub struct ExplosionFadeTimer(Timer);
-
-#[derive(Event)]
-pub struct StartGraphing;
-
-#[derive(Event)]
-pub enum DoneGraphing {
-    Failed(f32),
-    Done,
-}
-
-pub fn smoothstep(x: f32) -> f32 {
-    if x < 0. {
-        0.
-    } else if x > 1. {
-        1.
-    } else {
-        x * x * (3. - 2. * x)
     }
 }
 
@@ -97,18 +144,17 @@ pub fn fade_explosions(
 
 pub fn update_turn(
     mut commands: Commands,
-    mut state: ResMut<GamePhase>,
-    time: Res<Time>,
     mut graph: Option<Single<&mut InProgressGraph>>,
-    mut start_graphing_events: EventWriter<StartGraphing>,
-    mut finish_graphing_events: EventWriter<DoneGraphing>,
+    mut start_graphing_events: EventWriter<StartGraphingEvent>,
+    mut finish_graphing_events: EventWriter<DoneGraphingEvent>,
+    mut skip_graphing_events: EventWriter<SkipGraphingEvent>,
     soldiers: Query<(Entity, &Soldier)>,
-    asset_server: Res<AssetServer>,
+    mut resources: UpdateTurnResources,
 ) {
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
+    let Some(playing_state) = resources.state.playing_state_mut() else {
         return;
     };
-    match &mut playing_state.turn_phase {
+    match playing_state.turn_phase_mut() {
         TurnPhase::ShowPhase(TurnShowPhase::Graphing {
             function,
             prev_y,
@@ -116,10 +162,14 @@ pub fn update_turn(
             timer,
         }) => {
             let mut points = Vec::new();
-            for _ in 0..timer.tick(time.delta()).times_finished_this_tick() {
+            for _ in 0..timer
+                .tick(resources.time.delta())
+                .times_finished_this_tick()
+            {
                 // if timer.tick(time.delta()).finished() {
                 let Ok(next_y) = (function.original)(*next_x) else {
-                    finish_graphing_events.send(DoneGraphing::Failed(*next_x));
+                    finish_graphing_events
+                        .send(DoneGraphingEvent::Failed(*next_x));
                     break;
                 };
                 let point = Vec2::new(*next_x, next_y + function.shift_up);
@@ -130,61 +180,82 @@ pub fn update_turn(
                             > GRAPH_RES * DISCONTINUITY_THRESHOLD
                     })
                 {
-                    finish_graphing_events.send(DoneGraphing::Failed(point.x));
+                    finish_graphing_events
+                        .send(DoneGraphingEvent::Failed(point.x));
                     break;
                 } else if point.x.abs() > 10. || point.y.abs() > 10. {
-                    finish_graphing_events.send(DoneGraphing::Done);
+                    finish_graphing_events.send(DoneGraphingEvent::Done);
                     break;
                 }
                 *next_x += GRAPH_RES;
                 points.push(point * 20.);
 
                 // Destroy any soldier that is hit
-                *(if let PlayerSelect::Player1 = playing_state.turn {
-                    &mut playing_state.player_2.living_soldiers
-                } else {
-                    &mut playing_state.player_1.living_soldiers
-                }) = if let PlayerSelect::Player1 = playing_state.turn {
-                    playing_state.player_2.living_soldiers.clone()
-                } else {
-                    playing_state.player_1.living_soldiers.clone()
-                }
-                .into_iter()
-                .filter(|i| {
-                    if i.graph_location.distance(point) < SOLDIER_RADIUS / 20. {
-                        commands.spawn((
-                            Sprite::from_image(
-                                asset_server.load("explosion.png"),
-                            ),
-                            ExplosionFadeTimer(Timer::new(
-                                Duration::from_secs(1),
-                                TimerMode::Once,
-                            )),
-                            Transform {
-                                translation: Vec3::new(
-                                    i.graph_location.x * 20.,
-                                    i.graph_location.y * 20.,
-                                    EXPLOSION_Z,
+                // *(if let PlayerSelect::Player1 = playing_state.turn {
+                //     &mut playing_state.player_2.living_soldiers
+                // } else {
+                //     &mut playing_state.player_1.living_soldiers
+                // }) = if let PlayerSelect::Player1 = playing_state.turn {
+                //     playing_state.player_2.living_soldiers.clone()
+                // } else {
+                //     playing_state.player_1.living_soldiers.clone()
+                // }
+                playing_state
+                    .current_player_mut()
+                    .soldiers_mut()
+                    .into_iter()
+                    .filter(|i| {
+                        if i.graph_location().distance(point)
+                            < SOLDIER_RADIUS / 20.
+                        {
+                            commands.spawn((
+                                Sprite::from_image(
+                                    resources
+                                        .asset_server
+                                        .load("explosion.png"),
                                 ),
-                                rotation: Quat::IDENTITY,
-                                scale: Vec3::ONE
-                                    * (EXPLOSION_SPRITE_SIZE
-                                        / EXPLOSION_IMAGE_SIZE),
-                            },
-                        ));
-                        for soldier in soldiers.iter() {
-                            if soldier.1.player == i.player
-                                && soldier.1.id == i.id
-                            {
-                                commands.entity(soldier.0).despawn();
+                                ExplosionFadeTimer(Timer::new(
+                                    Duration::from_secs(1),
+                                    TimerMode::Once,
+                                )),
+                                Transform {
+                                    translation: Vec3::new(
+                                        i.graph_location().x * 20.,
+                                        i.graph_location().y * 20.,
+                                        EXPLOSION_Z,
+                                    ),
+                                    rotation: Quat::IDENTITY,
+                                    scale: Vec3::ONE
+                                        * (EXPLOSION_SPRITE_SIZE
+                                            / EXPLOSION_IMAGE_SIZE),
+                                },
+                            ));
+                            commands.spawn(AudioPlayer::new(
+                                resources.asset_server.load("explosion.mp3"),
+                            ));
+                            for soldier in soldiers.iter() {
+                                if soldier.1.player() == i.player()
+                                    && soldier.1.id() == i.id()
+                                {
+                                    commands.entity(soldier.0).despawn();
+                                }
                             }
+                            let player = if i.player() == PlayerSelect::Player1
+                            {
+                                &mut playing_state.player_1
+                            } else {
+                                &mut playing_state.player_2
+                            };
+                            if player.active_soldier == i.id as usize {
+                                // let mut soldiers = player.living_soldiers.clone();
+                                player.active_soldier = 0;
+                            }
+                            false
+                        } else {
+                            true
                         }
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect();
+                    })
+                    .collect();
             }
             if let Some(graph) = &mut graph {
                 graph.points.extend(points)
@@ -193,70 +264,42 @@ pub fn update_turn(
             }
         }
         TurnPhase::InputPhase { timer } => {
-            if timer.tick(time.delta()).finished() {
-                start_graphing_events.send(StartGraphing);
+            if timer.tick(resources.time.delta()).finished() {
+                let current_player =
+                    if PlayerSelect::Player1 == playing_state.turn {
+                        &playing_state.player_2
+                    } else {
+                        &playing_state.player_1
+                    };
+                let func_input = &current_player.living_soldiers
+                    [current_player.active_soldier]
+                    .equation;
+                let func = match func_input
+                    .parse::<crate::parse::ParsedFunction>()
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        skip_graphing_events.send(SkipGraphingEvent);
+                        log::info!(
+                            "User typed bad function. Input:\n`{func_input}`\nError:\n{e}"
+                        );
+                        return;
+                    }
+                };
+                start_graphing_events.send(StartGraphingEvent(func));
             }
         }
         _ => (),
     }
 }
 
-pub fn start_graphing(
-    mut state: ResMut<GamePhase>,
-    mut events: EventReader<StartGraphing>,
-    mut finish_graphing_events: EventWriter<DoneGraphing>,
-) {
-    if events.read().next().is_none() {
-        return;
-    }
-    let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-        return;
-    };
-
-    let TurnPhase::InputPhase { timer: _ } = &playing_state.turn_phase else {
-        return;
-    };
-
-    let current_player = if let PlayerSelect::Player1 = playing_state.turn {
-        &playing_state.player_1
-    } else {
-        &playing_state.player_2
-    };
-
-    let current_input =
-        &current_player.living_soldiers[current_player.active_soldier].equation;
-    let mut parsed_function =
-        current_input.parse::<parse::ParsedFunction>().unwrap(); // TODO: Don't unwrap
-    parsed_function.add_var("e", std::f32::consts::E);
-    parsed_function.add_var("π", std::f32::consts::PI);
-    let func = parsed_function.bind("x");
-
-    let active_soldier_pos = current_player.living_soldiers
-        [current_player.active_soldier]
-        .graph_location;
-    let Ok(y_start) = func(active_soldier_pos.x) else {
-        finish_graphing_events.send(DoneGraphing::Failed(active_soldier_pos.x));
-        return;
-    };
-    let offset = active_soldier_pos.y - y_start;
-    // - expression.clone().bind("x").unwrap()(active_soldier_pos.x as f64)
-    // as f32;
-    playing_state.turn_phase = TurnPhase::ShowPhase(TurnShowPhase::Graphing {
-        function: Function {
-            original: Arc::new(func),
-            shift_up: offset,
-        },
-        prev_y: None,
-        next_x: active_soldier_pos.x,
-        timer: Timer::new(
-            Duration::from_secs_f32(GRAPH_RES / GRAPHING_SPEED),
-            TimerMode::Repeating,
-        ),
-    });
+#[derive(SystemParam)]
+pub struct UpdateTurnResources<'w, 's> {
+    state: ResMut<'w, GameState>,
+    time: Res<'w, Time>,
+    asset_server: Res<'w, AssetServer>,
+    _phantom_data: PhantomData<&'s ()>,
 }
-
-#[derive(Component)]
-pub struct CurrentPlayerText;
 
 pub fn draw_graph(
     mut gizmos: Gizmos,
@@ -280,6 +323,3 @@ pub fn draw_graph(
         gizmos.linestrip_2d(graph.points.clone(), Color::srgb(1., 0., 0.));
     }
 }
-
-#[derive(Component)]
-pub struct GridBackground;

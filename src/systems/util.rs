@@ -1,9 +1,8 @@
 use bevy::prelude::*;
-use bevy_egui::EguiContexts;
 
 pub fn capture_info(
     mut input_capture_state: ResMut<InputCaptureState>,
-    mut egui: EguiContexts,
+    mut egui: bevy_egui::EguiContexts,
 ) {
     input_capture_state.keyboard_captured =
         egui.ctx_mut().wants_keyboard_input();
@@ -18,4 +17,10 @@ pub struct InputCaptureState {
 
 pub fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
+}
+
+pub fn currently_graphing(
+    graph: Option<Single<&crate::InProgressGraph>>,
+) -> bool {
+    graph.is_some()
 }

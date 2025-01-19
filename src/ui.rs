@@ -1,5 +1,5 @@
 use super::StartPlaying;
-use crate::{StartGraphing, models::*};
+use crate::{StartGraphingEvent, models::*};
 use bevy::prelude::*;
 use bevy_egui::{
     EguiContexts,
@@ -14,7 +14,7 @@ pub fn ui_system(
     mut state: ResMut<GamePhase>,
     start_playing_events: EventWriter<StartPlaying>,
     gizmos: Gizmos,
-    start_graphing_events: EventWriter<StartGraphing>,
+    start_graphing_events: EventWriter<StartGraphingEvent>,
 ) {
     match *state {
         GamePhase::Setup(_) => {
@@ -91,7 +91,7 @@ fn play_ui(
     context: &bevy_egui::egui::Context,
     state: &mut GamePhase,
     mut gizmos: Gizmos,
-    mut start_graphing_events: EventWriter<StartGraphing>,
+    mut start_graphing_events: EventWriter<StartGraphingEvent>,
 ) {
     let &mut GamePhase::Playing(ref mut playing_state) = state else {
         return;
@@ -124,7 +124,9 @@ fn play_ui(
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(current_input);
                 if ui.button("Done").clicked() {
-                    start_graphing_events.send(StartGraphing);
+                    if let Ok(func) = current_input.parse() {
+                        start_graphing_events.send(StartGraphingEvent(func));
+                    }
                 }
                 ui.label(timer.remaining().as_secs().to_string());
             })
