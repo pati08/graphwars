@@ -1,3 +1,6 @@
+#![feature(vec_pop_if)]
+#![feature(let_chains)]
+
 use bevy::prelude::*;
 
 mod models;
@@ -53,13 +56,11 @@ fn main() {
         .run();
 }
 
+/// Tick the timer for the current turn (if one is active)
 fn update_turn_timer(mut state: ResMut<GameState>, time: Res<Time>) {
     let Some(playing_state) = state.playing_state_mut() else {
         return;
     };
-    // let &mut GamePhase::Playing(ref mut playing_state) = &mut *state else {
-    //     return;
-    // };
     if let TurnPhase::ShowPhase(TurnShowPhase::Waiting { timer }) =
         &mut playing_state.turn_phase_mut()
     {
@@ -67,6 +68,7 @@ fn update_turn_timer(mut state: ResMut<GameState>, time: Res<Time>) {
     }
 }
 
+/// Send a `SkipGraphingEvent` if a player's turn has expired
 fn is_turn_over(
     mut events: EventReader<SkipGraphingEvent>,
     state: Res<GameState>,
@@ -83,6 +85,12 @@ fn is_turn_over(
         }
 }
 
+/// Do the processes needed to switch the turns of the players, including:
+/// - Checking for a winner
+/// - Going to the next soldier for the current player
+/// - Switch the turn data
+/// - Swap the x coordinates of all soldiers
+/// - Spawn name of new player
 fn next_turn(
     mut commands: Commands,
     mut state: ResMut<GameState>,
@@ -138,6 +146,7 @@ fn next_turn(
     ));
 }
 
+/// Despawn displays from currently graphed player
 fn reset_graph(
     mut commands: Commands,
     graph: Single<Entity, With<InProgressGraph>>,
@@ -147,9 +156,12 @@ fn reset_graph(
     commands.entity(*player_name).despawn();
 }
 
+/// Event that triggers the game to start from the setup phase
 #[derive(Event)]
 struct StartPlaying;
 
+/// Transition from a setup phase to a playing phase by changing the game state
+/// and spawning relevant entities
 fn start_playing(
     mut events: EventReader<StartPlaying>,
     mut state: ResMut<GameState>,

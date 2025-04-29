@@ -161,18 +161,22 @@ pub fn update_turn(
             next_x,
             timer,
         }) => {
+            let func = Arc::clone(&function.original);
+            let func_shift = function.shift_up;
             let mut points = Vec::new();
+            let prev_y = *prev_y;
+            let mut current_x = *next_x;
             for _ in 0..timer
                 .tick(resources.time.delta())
                 .times_finished_this_tick()
             {
                 // if timer.tick(time.delta()).finished() {
-                let Ok(next_y) = (function.original)(*next_x) else {
+                let Ok(next_y) = func(current_x) else {
                     finish_graphing_events
-                        .send(DoneGraphingEvent::Failed(*next_x));
+                        .send(DoneGraphingEvent::Failed(current_x));
                     break;
                 };
-                let point = Vec2::new(*next_x, next_y + function.shift_up);
+                let point = Vec2::new(current_x, next_y + func_shift);
                 if point.y.is_nan()
                     || point.y.is_infinite()
                     || prev_y.is_some_and(|y| {
@@ -187,93 +191,72 @@ pub fn update_turn(
                     finish_graphing_events.send(DoneGraphingEvent::Done);
                     break;
                 }
-                *next_x += GRAPH_RES;
+                current_x += GRAPH_RES;
                 points.push(point * 20.);
 
-                // Destroy any soldier that is hit
-                // *(if let PlayerSelect::Player1 = playing_state.turn {
-                //     &mut playing_state.player_2.living_soldiers
-                // } else {
-                //     &mut playing_state.player_1.living_soldiers
-                // }) = if let PlayerSelect::Player1 = playing_state.turn {
-                //     playing_state.player_2.living_soldiers.clone()
-                // } else {
-                //     playing_state.player_1.living_soldiers.clone()
-                // }
-                playing_state
-                    .current_player_mut()
-                    .soldiers_mut()
+                #[allow(clippy::unnecessary_to_owned)]
+                for i in playing_state
+                    .other_player()
+                    .soldiers()
+                    .to_vec()
                     .into_iter()
                     .filter(|i| {
-                        if i.graph_location().distance(point)
+                        i.graph_location().distance(point)
                             < SOLDIER_RADIUS / 20.
-                        {
-                            commands.spawn((
-                                Sprite::from_image(
-                                    resources
-                                        .asset_server
-                                        .load("explosion.png"),
-                                ),
-                                ExplosionFadeTimer(Timer::new(
-                                    Duration::from_secs(1),
-                                    TimerMode::Once,
-                                )),
-                                Transform {
-                                    translation: Vec3::new(
-                                        i.graph_location().x * 20.,
-                                        i.graph_location().y * 20.,
-                                        EXPLOSION_Z,
-                                    ),
-                                    rotation: Quat::IDENTITY,
-                                    scale: Vec3::ONE
-                                        * (EXPLOSION_SPRITE_SIZE
-                                            / EXPLOSION_IMAGE_SIZE),
-                                },
-                            ));
-                            commands.spawn(AudioPlayer::new(
-                                resources.asset_server.load("explosion.mp3"),
-                            ));
-                            for soldier in soldiers.iter() {
-                                if soldier.1.player() == i.player()
-                                    && soldier.1.id() == i.id()
-                                {
-                                    commands.entity(soldier.0).despawn();
-                                }
-                            }
-                            let player = if i.player() == PlayerSelect::Player1
-                            {
-                                &mut playing_state.player_1
-                            } else {
-                                &mut playing_state.player_2
-                            };
-                            if player.active_soldier == i.id as usize {
-                                // let mut soldiers = player.living_soldiers.clone();
-                                player.active_soldier = 0;
-                            }
-                            false
-                        } else {
-                            true
-                        }
                     })
-                    .collect();
+                {
+                    commands.spawn((
+                        Sprite::from_image(
+                            resources.asset_server.load("explosion.png"),
+                        ),
+                        ExplosionFadeTimer(Timer::new(
+                            Duration::from_secs(1),
+                            TimerMode::Once,
+                        )),
+                        Transform {
+                            translation: Vec3::new(
+                                i.graph_location().x * 20.,
+                                i.graph_location().y * 20.,
+                                EXPLOSION_Z,
+                            ),
+                            rotation: Quat::IDENTITY,
+                            scale: Vec3::ONE
+                                * (EXPLOSION_SPRITE_SIZE
+                                    / EXPLOSION_IMAGE_SIZE),
+                        },
+                    ));
+                    commands.spawn(AudioPlayer::new(
+                        resources.asset_server.load("explosion.mp3"),
+                    ));
+                    for soldier in soldiers.iter() {
+                        if soldier.1.player() == i.player()
+                            && soldier.1.id() == i.id()
+                        {
+                            commands.entity(soldier.0).despawn();
+                        }
+                    }
+                    playing_state.current_player_mut().destroy_soldier(i.id());
+                }
+                playing_state.players_mut().0.verify_active_soldier();
+                playing_state.players_mut().1.verify_active_soldier();
             }
             if let Some(graph) = &mut graph {
                 graph.points.extend(points)
             } else {
                 commands.spawn(InProgressGraph { points });
             }
+            if let TurnPhase::ShowPhase(TurnShowPhase::Graphing {
+                next_x,
+                ..
+            }) = playing_state.turn_phase_mut()
+            {
+                *next_x = current_x;
+            }
         }
         TurnPhase::InputPhase { timer } => {
             if timer.tick(resources.time.delta()).finished() {
-                let current_player =
-                    if PlayerSelect::Player1 == playing_state.turn {
-                        &playing_state.player_2
-                    } else {
-                        &playing_state.player_1
-                    };
-                let func_input = &current_player.living_soldiers
-                    [current_player.active_soldier]
-                    .equation;
+                let current_player = playing_state.current_player();
+                let func_input = &current_player.current_soldier().equation;
                 let func = match func_input
                     .parse::<crate::parse::ParsedFunction>()
                 {
@@ -303,12 +286,15 @@ pub struct UpdateTurnResources<'w, 's> {
 
 pub fn draw_graph(
     mut gizmos: Gizmos,
-    state: Res<GamePhase>,
+    state: Res<GameState>,
     graph: Option<Single<&InProgressGraph>>,
 ) {
-    let GamePhase::Playing(_) = *state else {
+    if state.playing_state().is_none() {
         return;
-    };
+    }
+    // let GamePhase::Playing(_) = *state else {
+    //     return;
+    // };
 
     gizmos
         .grid_2d(

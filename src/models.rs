@@ -7,19 +7,19 @@ pub enum PlayerSelect {
     Player2,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct GameState(GamePhase);
-
-impl Default for GameState {
-    fn default() -> Self {
-        GameState(GamePhase::default())
-    }
-}
 
 enum GamePhase {
     Setup(SetupPhase),
     Playing(PlayPhase),
     GameFinished(FinishedPhase),
+}
+
+pub enum GamePhaseNoData {
+    Setup,
+    Playing,
+    GameFinished,
 }
 
 impl GameState {
@@ -44,9 +44,9 @@ impl GameState {
             _ => None,
         }
     }
-    pub fn setup_state_mut(&self) -> Option<&SetupPhase> {
+    pub fn setup_state_mut(&mut self) -> Option<&mut SetupPhase> {
         match self.0 {
-            GamePhase::Setup(ref state) => Some(state),
+            GamePhase::Setup(ref mut state) => Some(state),
             _ => None,
         }
     }
@@ -86,6 +86,19 @@ impl GameState {
         };
         self.0 = GamePhase::Playing(playing_state);
         Ok(())
+    }
+    pub fn finished_state_mut(&mut self) -> Option<&mut FinishedPhase> {
+        match self.0 {
+            GamePhase::GameFinished(ref mut state) => Some(state),
+            _ => None,
+        }
+    }
+    pub fn game_phase(&self) -> GamePhaseNoData {
+        match self.0 {
+            GamePhase::GameFinished(_) => GamePhaseNoData::GameFinished,
+            GamePhase::Setup(_) => GamePhaseNoData::Setup,
+            GamePhase::Playing(_) => GamePhaseNoData::Playing,
+        }
     }
 }
 
@@ -154,6 +167,13 @@ impl PlayPhase {
             &mut self.player_2
         }
     }
+    pub fn other_player(&self) -> &PlayerState {
+        if self.turn == PlayerSelect::Player1 {
+            &self.player_2
+        } else {
+            &self.player_1
+        }
+    }
     pub fn next_turn(&mut self) {
         self.turn = if self.turn == PlayerSelect::Player1 {
             PlayerSelect::Player2
@@ -179,6 +199,9 @@ impl PlayPhase {
             &self.player_1.living_soldiers,
             &self.player_2.living_soldiers,
         )
+    }
+    pub fn players_mut(&mut self) -> (&mut PlayerState, &mut PlayerState) {
+        (&mut self.player_1, &mut self.player_2)
     }
 }
 
@@ -218,7 +241,7 @@ pub struct PlayerState {
     // system. For now, just know that it
     // CANNOT be empty.
     living_soldiers: Vec<Soldier>,
-    active_soldier: usize,
+    active_soldier: u8,
 }
 
 impl PlayerState {
@@ -231,30 +254,84 @@ impl PlayerState {
         }
     }
     pub fn next_soldier(&mut self) {
-        self.active_soldier =
-            (self.active_soldier + 1) % self.living_soldiers.len();
+        self.active_soldier = self.living_soldiers[(self
+            .living_soldiers
+            .iter()
+            .position(|i| i.id == self.active_soldier)
+            .unwrap_or(0)
+            + 1)
+            % self.living_soldiers.len()]
+        .id;
     }
     pub fn current_soldier(&self) -> &Soldier {
         self.living_soldiers
-            .get(self.active_soldier)
+            .iter()
+            .find(|i| i.id == self.active_soldier)
             .unwrap_or_else(|| &self.living_soldiers[0])
+    }
+    pub fn current_soldier_mut(&mut self) -> &mut Soldier {
+        let current_is_valid = self
+            .living_soldiers
+            .iter()
+            .any(|i| i.id == self.active_soldier);
+        if current_is_valid {
+            self.living_soldiers
+                .iter_mut()
+                .find(|i| i.id == self.active_soldier)
+                .unwrap()
+        } else {
+            &mut self.living_soldiers[0]
+        }
     }
     pub fn soldiers(&self) -> &[Soldier] {
         &self.living_soldiers
-    }
-    pub fn soldiers_mut(&mut self) -> &mut [Soldier] {
-        &mut self.living_soldiers
     }
     pub fn verify_active_soldier(&mut self) -> bool {
         if !self
             .living_soldiers
             .iter()
-            .any(|i| i.id as usize == self.active_soldier)
+            .any(|i| i.id == self.active_soldier)
         {
-            self.active_soldier = self.living_soldiers[0].id as usize;
+            self.active_soldier = self.living_soldiers[0].id;
             true
         } else {
             false
+        }
+    }
+    pub fn destroy_soldier(&mut self, id: u8) -> bool {
+        self.living_soldiers.pop_if(|i| i.id == id).is_some()
+    }
+}
+
+pub struct PlayUiData<'a> {
+    pub input_ui: Option<InputUiData<'a>>,
+    pub soldier_loc: Vec2,
+}
+pub struct InputUiData<'a> {
+    pub current_input: &'a mut String,
+    pub timer: &'a mut Timer,
+}
+impl<'a> PlayUiData<'a> {
+    pub fn new(state: &'a mut PlayPhase) -> PlayUiData<'a> {
+        let loc = state.current_player().current_soldier().graph_location;
+        let TurnPhase::InputPhase { timer, .. } = &mut state.turn_phase else {
+            return Self {
+                input_ui: None,
+                soldier_loc: loc,
+            };
+        };
+        let current_player = if state.turn == PlayerSelect::Player1 {
+            &mut state.player_1
+        } else {
+            &mut state.player_2
+        };
+        let soldier = current_player.current_soldier_mut();
+        Self {
+            input_ui: Some(InputUiData {
+                current_input: &mut soldier.equation,
+                timer,
+            }),
+            soldier_loc: loc,
         }
     }
 }
